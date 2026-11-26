@@ -605,15 +605,40 @@ async function generateWithHuggingFace(
     if (err instanceof DOMException && err.name === 'AbortError') {
       throw err;
     }
-    const rawMsg = err instanceof Error ? err.message : String(err);
-    if (/403|permissions|inference providers/i.test(rawMsg)) {
+    let rawMsg = err instanceof Error ? err.message : String(err);
+    const httpBody = (err as { httpResponse?: { body?: unknown; status?: number } })
+      ?.httpResponse;
+    if (httpBody?.body) {
+      const bodyStr =
+        typeof httpBody.body === 'string'
+          ? httpBody.body
+          : JSON.stringify(httpBody.body);
+      if (bodyStr && !rawMsg.includes(bodyStr)) {
+        rawMsg = `${rawMsg} — ${bodyStr}`;
+      }
+    }
+    if (
+      httpBody?.status === 402 ||
+      /402|monthly included credits|exceeded.*credits|payment required/i.test(rawMsg)
+    ) {
       throw new Error(
-        'Hugging Face Token thiếu quyền "Make calls to Inference Providers". Hãy tạo Fine-grained token mới và bật quyền Inference Providers tại huggingface.co/settings/tokens.'
+        `Tài khoản Hugging Face đã hết credit miễn phí hàng tháng cho Inference Providers (${rawMsg}). Bạn có thể chuyển sang Pollinations hoặc AI Horde Free.`
       );
     }
-    if (/402|credits|exceeded|payment/i.test(rawMsg)) {
+    if (
+      httpBody?.status === 401 ||
+      /401|invalid.*token|unauthorized/i.test(rawMsg)
+    ) {
       throw new Error(
-        'Tài khoản Hugging Face đã hết credit miễn phí hàng tháng cho Inference Providers. Bạn có thể chuyển sang Pollinations hoặc AI Horde Free.'
+        `Hugging Face Token không hợp lệ hoặc đã bị thu hồi. Hãy kiểm tra lại token trong mục API Keys. (${rawMsg})`
+      );
+    }
+    if (
+      httpBody?.status === 403 ||
+      /403|sufficient permissions|does not have.*permission/i.test(rawMsg)
+    ) {
+      throw new Error(
+        `Hugging Face từ chối quyền truy cập (${rawMsg}). Nếu vừa tick "Make calls to Inference Providers", hãy bấm Save ở cuối trang HF (hoặc thử model không cần duyệt license như FLUX.1-schnell / Z-Image Turbo).`
       );
     }
     throw new Error(`Hugging Face lỗi: ${rawMsg}`);
