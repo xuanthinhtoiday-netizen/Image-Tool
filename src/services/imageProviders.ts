@@ -1,3 +1,4 @@
+import { InferenceClient } from '@huggingface/inference';
 import {
   ApiKeys,
   AspectRatioOption,
@@ -548,48 +549,75 @@ async function generateWithHuggingFace(
     throw new Error('Vui lòng nhập Hugging Face Token trong mục Cài đặt API Key.');
   }
 
-  onStatus?.(`Đang chạy ${modelId} trên Hugging Face...`, 35);
+  const width = Math.min(1024, Math.round(aspectRatio.width / 64) * 64);
+  const height = Math.min(1024, Math.round(aspectRatio.height / 64) * 64);
 
-  const response = await fetch(
-    `https://router.huggingface.co/hf-inference/models/${modelId}`,
-    {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${key}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
+  onStatus?.(`Đang định tuyến ${modelId} qua Hugging Face Providers...`, 35);
+
+  const client = new InferenceClient(key);
+
+  const callProvider = async (provider: 'auto' | 'fal-ai') => {
+    const dataUrl = await client.textToImage(
+      {
+        provider,
+        model: modelId,
         inputs: prompt,
         parameters: {
           negative_prompt: negativePrompt.trim() || undefined,
-          width: Math.min(1024, Math.round(aspectRatio.width / 64) * 64),
-          height: Math.min(1024, Math.round(aspectRatio.height / 64) * 64),
+          width,
+          height,
         },
-      }),
-      signal,
-    }
-  );
-
-  if (!response.ok) {
-    let msg = `HTTP ${response.status}`;
-    try {
-      const err = await response.json();
-      msg = err?.error || msg;
-    } catch {
-      // ignore
-    }
-    throw new Error(`Hugging Face lỗi: ${msg}`);
-  }
-
-  onStatus?.('Đang hoàn tất tải ảnh...', 90);
-  const blob = await response.blob();
-  const dataUrl = await blobToDataUrl(blob);
-  return {
-    imageUrl: dataUrl,
-    width: aspectRatio.width,
-    height: aspectRatio.height,
-    seed,
+      },
+      {
+        outputType: 'dataUrl',
+        signal,
+      }
+    );
+    return dataUrl;
   };
+
+  try {
+    let imageUrl: string;
+    try {
+      imageUrl = await callProvider('auto');
+    } catch (firstErr) {
+      if (firstErr instanceof DOMException && firstErr.name === 'AbortError') {
+        throw firstErr;
+      }
+      const firstMsg = firstErr instanceof Error ? firstErr.message : '';
+      // If auto provider fails due to deprecated hf-inference, retry explicitly via fal-ai
+      if (/deprecated|not supported|hf-inference/i.test(firstMsg)) {
+        onStatus?.(`Đang chuyển sang provider fal-ai cho ${modelId}...`, 55);
+        imageUrl = await callProvider('fal-ai');
+      } else {
+        throw firstErr;
+      }
+    }
+
+    onStatus?.('Đang hoàn tất tải ảnh...', 92);
+    return {
+      imageUrl,
+      width,
+      height,
+      seed,
+    };
+  } catch (err) {
+    if (err instanceof DOMException && err.name === 'AbortError') {
+      throw err;
+    }
+    const rawMsg = err instanceof Error ? err.message : String(err);
+    if (/403|permissions|inference providers/i.test(rawMsg)) {
+      throw new Error(
+        'Hugging Face Token thiếu quyền "Make calls to Inference Providers". Hãy tạo Fine-grained token mới và bật quyền Inference Providers tại huggingface.co/settings/tokens.'
+      );
+    }
+    if (/402|credits|exceeded|payment/i.test(rawMsg)) {
+      throw new Error(
+        'Tài khoản Hugging Face đã hết credit miễn phí hàng tháng cho Inference Providers. Bạn có thể chuyển sang Pollinations hoặc AI Horde Free.'
+      );
+    }
+    throw new Error(`Hugging Face lỗi: ${rawMsg}`);
+  }
 }
 
 export async function generateImage(params: GenerateParams): Promise<GenerateResult> {
